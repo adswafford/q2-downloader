@@ -67,3 +67,6 @@ target/
 # qiime
 *.qza
 *.qzv
+
+# Mac Directory
+*.DS_Store
