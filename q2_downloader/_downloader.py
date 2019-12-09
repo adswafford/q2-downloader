@@ -8,8 +8,10 @@
 
 import qiime2
 
-import requests
 import pandas
+import requests
+from lxml import etree
+from xmltodict import parse
 
 from q2_types.per_sample_sequences import \
         SingleLanePerSampleSingleEndFastqDirFmt
@@ -19,15 +21,17 @@ def fetch(accession: str, repository: str, only_metagenomics: bool = True,
           only_illumina: bool = True) -> SingleLanePerSampleSingleEndFastqDirFmt:
 
     # translate the code from the old script
-    study_details = ena_study_details(accession, repository,
-                                      only_metagenomics, only_illumina)
+    study_details = fetch_study_details(accession, repository,
+                                        only_metagenomics, only_illumina)
+    fetch_study_info(accession)
+
     pass
 
 
-def ena_study_details(accession: str, repository: str,
-                      only_metagenomics: bool, only_illumina: bool):
+def fetch_study_details(accession: str, repository: str,
+                        only_metagenomics: bool, only_illumina: bool):
     """
-        Returns the details of the EBI study
+        Returns the details of the study
         The details include all the sample ids, run ids, fastq-file ftps etc.
 
     Parameters
@@ -38,9 +42,16 @@ def ena_study_details(accession: str, repository: str,
     repository: str
         The name of the public repository
 
+    only_metagenomics: bool
+        Specify only fetching metagenomics studies
+
+    only_illumina: bool
+        Specify only fetching illumina studies
 
     Returns
     -------
+    study details: pandas.DataFrame
+        The details of the study
 
     """
     # Grab the details related to the given accession
@@ -60,6 +71,29 @@ def ena_study_details(accession: str, repository: str,
 
 def details_iterator(accession: str, details: list, repository: str,
                      only_metagenomics: bool, only_illumina: bool):
+    """
+        Helper function to fetch the details of the study
+
+    Parameters
+    ----------
+    accession : str
+        The accession ID of the study
+
+    repository: str
+        The name of the public repository
+
+    only_metagenomics: bool
+        Specify only fetching metagenomics studies
+
+    only_illumina: bool
+        Specify only fetching illumina studies
+
+    Returns
+    -------
+    study details: pandas.DataFrame
+        The details of the study
+
+    """
     # get header and indices
     if repository == 'ENA':
         header = details[0].split(b'\t')
@@ -115,3 +149,79 @@ def details_iterator(accession: str, details: list, repository: str,
         else:
             raise Exception(accession + ' has no samples')
     return pandas.DataFrame(final_details, columns=header)
+
+
+def fetch_study_info(accession: str):
+    """
+        Fetch the information of the study.
+        The information includes title, abstract and etc.
+
+    Parameters
+    ----------
+    accession : str
+        The accession ID of the study
+
+    """
+    response_content, is_valid = check_info_xml(accession)
+    if not is_valid:
+        return
+
+    content_children = etree.fromstring(response_content).getchildren()
+    is_study = content_children[0]
+    if is_study.tag != 'STUDY':
+        secondary_id = is_study.find('IDENTIFIERS').find('SECONDARY_ID')
+        if secondary_id is None:
+            raise Exception(accession + " is not a valid ENA study ID")
+        else:
+            accession = secondary_id.text
+            response_content, is_valid = check_info_xml(accession)
+            if not is_valid:
+                return
+
+    doc = parse(response_content)
+    study_title = doc['ROOT']['STUDY']['DESCRIPTOR']['STUDY_TITLE']
+    alias = doc['ROOT']['STUDY']['@alias']
+    study_abstract = doc['ROOT']['STUDY']['DESCRIPTOR']['STUDY_ABSTRACT'] \
+        if 'STUDY_ABSTRACT' in doc['ROOT']['STUDY']['DESCRIPTOR'] else 'None'
+    description = doc['ROOT']['STUDY']['DESCRIPTOR']['STUDY_DESCRIPTION'] \
+        if 'STUDY_DESCRIPTION' in doc['ROOT']['STUDY']['DESCRIPTOR'] \
+        else 'None'
+    # Creating default values for PI and env
+    PI = 'ENA import'
+    env = 'miscellaneous natural or artificial environment'
+
+    file = open(accession + '_study_info.txt', 'w')
+    file.write('STUDY_TITLE' + '\t' + 'ALIAS' + '\t' +
+               'STUDY_ABSTRACT' + '\t' +
+               'STUDY_DESCRIPTION' + '\t' +
+               'PRINCIPAL_INVESTIGATOR' + '\t' +
+               'ENVIRONMENTAL_PACKAGES' + '\n')
+    file.write(study_title + "\t" + alias + "\t" + study_abstract + "\t"
+               + description + "\t" + PI + "\t" + env + "\n")
+    file.close()
+
+
+def check_info_xml(accession: str):
+    """
+        Helper function to check if the page of the information of the study
+        is supported in ENA.
+
+    Parameters
+    ----------
+    accession : str
+        The accession ID of the study
+
+    """
+    host = 'http://www.ebi.ac.uk/ena/data/view/'
+    read_type = '&display=xml'
+    url = ''.join([host, accession, read_type])
+
+    response = requests.get(url)
+    response_content = response.content
+    content_children = etree.fromstring(response_content).getchildren()
+    if len(content_children) == 0:
+        print(accession + ' is a valid ENA study ID, but its information'
+              + ' (http://www.ebi.ac.uk/ena/data/view/' + accession
+              + ') page is not supported.\nskipping creating study_info.txt')
+        return response_content, False
+    return response_content, True
