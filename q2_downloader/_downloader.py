@@ -21,12 +21,64 @@ def fetch(accession: str, repository: str, only_metagenomics: bool = True,
           only_illumina: bool = True) -> SingleLanePerSampleSingleEndFastqDirFmt:
 
     # translate the code from the old script
-    study_details = fetch_study_details(accession, repository,
-                                        only_metagenomics, only_illumina)
-    fetch_study_info(accession)
+
+    #---- ENA ---#
+    if repository == 'ENA':
+        related_accessions = get_related_accession_ENA(accession)
+        if len(related_accessions) == 0:
+            raise Exception(accession + ' is not a valid ID')
+        for study_id in related_accessions:
+            study_details = fetch_study_details(study_id, repository,
+                                                only_metagenomics,
+                                                only_illumina)
+            fetch_study_info(study_id)
 
     pass
 
+def get_related_accession_ENA(accession: str):
+    response_content, is_valid = check_info_xml_ENA(accession)
+    if not is_valid:
+        return []
+    content_children = etree.fromstring(response_content).getchildren()
+    is_study = content_children[0]
+    if is_study.tag == 'STUDY':
+        return [accession]
+    elif is_study.tag == 'PROJECT':
+        doc = parse(response_content)
+        if 'RELATED_PROJECTS' not in doc['ROOT']['PROJECT']:
+            return [doc['ROOT']['PROJECT']['IDENTIFIERS']['SECONDARY_ID']]
+        else:
+            project_list = doc['ROOT']['PROJECT']['RELATED_PROJECTS']\
+                            ['RELATED_PROJECT']
+            study_ids = []
+            for relative in project_list:
+                for key in relative.keys():
+                    if key == 'CHILD_PROJECT':
+                        study_ids += get_related_accession_ENA(relative[key]['@accession'])
+            return study_ids
+
+def check_info_xml_ENA(accession: str):
+    """
+        Helper function to check if the page of the information of the study
+        is supported in ENA.
+
+    Parameters
+    ----------
+    accession : str
+        The accession ID of the study
+
+    """
+    host = 'http://www.ebi.ac.uk/ena/data/view/'
+    read_type = '&display=xml'
+    url = ''.join([host, accession, read_type])
+
+    response = requests.get(url)
+    response_content = response.content
+    content_children = etree.fromstring(response_content).getchildren()
+    if len(content_children) == 0:
+        print(accession + " is not a valid ENA study ID")
+        return response_content, False
+    return response_content, True
 
 def fetch_study_details(accession: str, repository: str,
                         only_metagenomics: bool, only_illumina: bool):
@@ -54,19 +106,23 @@ def fetch_study_details(accession: str, repository: str,
         The details of the study
 
     """
-    # Grab the details related to the given accession
-    host = 'http://www.ebi.ac.uk/ena/data/warehouse/filereport?accession='
-    read_type = '&result=read_run&'
-    url = ''.join([host, accession, read_type])
-    response = requests.get(url)
+    if repository == 'ENA':
+        # Grab the details related to the given accession
+        host = 'http://www.ebi.ac.uk/ena/data/warehouse/filereport?accession='
+        read_type = '&result=read_run&'
+        url = ''.join([host, accession, read_type])
+        response = requests.get(url)
 
-    # Check for valid accessions
-    if not response:
-        raise Exception(accession + ' is an invalid ENA study ID')
+        # Check for valid accessions
+        if not response:
+            raise Exception(accession + ' is an invalid ENA study ID')
 
-    details = response.content.split(b'\n')
-    return details_iterator(accession, details, repository,
-                            only_metagenomics, only_illumina)
+        details = response.content.split(b'\n')
+        return details_iterator(accession, details, repository,
+                                only_metagenomics, only_illumina)
+    elif repository == 'SRA':
+        pass
+    pass
 
 
 def details_iterator(accession: str, details: list, repository: str,
@@ -201,27 +257,4 @@ def fetch_study_info(accession: str):
     file.close()
 
 
-def check_info_xml(accession: str):
-    """
-        Helper function to check if the page of the information of the study
-        is supported in ENA.
 
-    Parameters
-    ----------
-    accession : str
-        The accession ID of the study
-
-    """
-    host = 'http://www.ebi.ac.uk/ena/data/view/'
-    read_type = '&display=xml'
-    url = ''.join([host, accession, read_type])
-
-    response = requests.get(url)
-    response_content = response.content
-    content_children = etree.fromstring(response_content).getchildren()
-    if len(content_children) == 0:
-        print(accession + ' is a valid ENA study ID, but its information'
-              + ' (http://www.ebi.ac.uk/ena/data/view/' + accession
-              + ') page is not supported.\nskipping creating study_info.txt')
-        return response_content, False
-    return response_content, True
